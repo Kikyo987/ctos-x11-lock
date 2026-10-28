@@ -1,0 +1,105 @@
+#!/bin/bash
+# Foreground X11 locker for the ctOS greeter page.
+# Copyright (C) 2026 Kikyo987
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# xss-lock and a key binding both exec this. The process stays up until the
+# page accepts the password. A failed start falls back to i3lock.
+
+set -u
+
+CTOS_ROOT="${CTOS_ROOT:-/opt/ctos}"
+QUICKSHELL="${QUICKSHELL:-/usr/bin/quickshell}"
+I3LOCK="${I3LOCK:-/usr/bin/i3lock}"
+LOCK_LIB="${CTOS_LOCK_LIB:-${HOME}/.local/lib/libctos-x11-lock-grab.so}"
+LOCK_QML="${CTOS_ROOT}/x11lock.qml"
+
+mkdir -p "${HOME}/.cache"
+LOG="${HOME}/.cache/ctos-lock.log"
+exec >>"$LOG" 2>&1
+echo "----- $(date '+%F %T') display=${DISPLAY:-} -----"
+
+fallback() {
+    echo "ctos-lock: falling back to i3lock"
+    exec "$I3LOCK" --nofork -c 0E0E0E
+}
+
+if [ -z "${DISPLAY:-}" ]; then
+    echo "ctos-lock: DISPLAY is unset"
+    fallback
+fi
+if [ ! -f "$LOCK_QML" ] || [ ! -f "$LOCK_LIB" ]; then
+    echo "ctos-lock: missing ${LOCK_QML} or ${LOCK_LIB}"
+    fallback
+fi
+
+READY=$(mktemp "${TMPDIR:-/tmp}/ctos-lock-ready.XXXXXX")
+export CTOS_LOCK_READY="$READY"
+export CTOS_MODE=lockd
+export CTOS_X11_LOCK=1
+export LD_PRELOAD="${LOCK_LIB}${LD_PRELOAD:+:$LD_PRELOAD}"
+
+child=0
+got_signal=0
+hold_fd=0
+if [ -n "${XSS_SLEEP_LOCK_FD:-}" ] && [ -e "/dev/fd/${XSS_SLEEP_LOCK_FD}" ]; then
+    hold_fd=1
+fi
+
+on_signal() {
+    got_signal=1
+    if [ "$child" -gt 0 ]; then
+        kill "$child" 2>/dev/null || true
+    fi
+}
+trap on_signal TERM INT HUP
+
+if [ "$hold_fd" -eq 1 ]; then
+    "$QUICKSHELL" --path "$LOCK_QML" {XSS_SLEEP_LOCK_FD}<&- &
+else
+    "$QUICKSHELL" --path "$LOCK_QML" &
+fi
+child=$!
+echo "ctos-lock: quickshell pid ${child}"
+
+ready=0
+for _ in $(seq 1 50); do
+    if [ -s "$READY" ]; then
+        ready=1
+        break
+    fi
+    if ! kill -0 "$child" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+if [ "$ready" -eq 1 ] && [ "$hold_fd" -eq 1 ]; then
+    exec {XSS_SLEEP_LOCK_FD}<&-
+    hold_fd=0
+    echo "ctos-lock: released sleep inhibitor"
+fi
+
+if [ "$ready" -ne 1 ]; then
+    echo "ctos-lock: lock window was not ready"
+    if [ "$child" -gt 0 ]; then
+        kill "$child" 2>/dev/null || true
+        wait "$child" 2>/dev/null || true
+        child=0
+    fi
+    rm -f "$READY"
+    fallback
+fi
+
+echo "ctos-lock: holding until unlock"
+wait "$child"
+rc=$?
+rm -f "$READY"
+echo "ctos-lock: quickshell exit ${rc} signal=${got_signal}"
+if [ "$got_signal" -eq 1 ]; then
+    exit 0
+fi
+if [ "$rc" -ne 0 ]; then
+    fallback
+fi
+exit 0

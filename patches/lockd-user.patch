@@ -1,0 +1,38 @@
+From: Kikyo987
+Subject: [PATCH] Lock the session user from the environment
+
+AuthManager has no user property. PAM then starts with an empty account
+and the X11 locker never reaches the password page.
+
+diff --git a/greeter/services/LockdHandler.qml b/greeter/services/LockdHandler.qml
+--- a/greeter/services/LockdHandler.qml
++++ b/greeter/services/LockdHandler.qml
+@@ -21,7 +21,8 @@ Singleton {
+     PamContext {
+         id: pam
+ 
+-        user: AuthManager.user
++        // AuthManager has no user property. Lock the account that owns this session.
++        user: Quickshell.env("USER") || ""
+ 
+         config: "login"
+ 
+@@ -46,6 +47,9 @@ Singleton {
+         repeat: true
+ 
+         onTriggered: {
++            if (!pam.user)
++                return;
++
+             if (!pam.responseRequired) {
+                 const success = pam.start();
+ 
+@@ -54,7 +58,7 @@ Singleton {
+                 }
+             }
+ 
+-            logger.info(`Session opened for user ${AuthManager.user}`);
++            logger.info(`Session opened for user ${pam.user}`);
+ 
+             handler.ready();
+             sessionStarter.stop();
